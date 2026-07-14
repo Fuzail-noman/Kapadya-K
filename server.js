@@ -41,10 +41,6 @@ app.get("/", (req, res) => {
   res.json({ message: "Backend Running..." });
 });
  
-// EXPORT APP FOR VERCEL
-const PORT = process.env.PORT || 5000;
- 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+
+module.exports = app;
  
