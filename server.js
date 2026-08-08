@@ -36,11 +36,19 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/orders", require("./routes/orderRoutes"));
  
-// TEST ROUTE
+
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+});
+// // TEST ROUTE
+// app.get("/", (req, res) => {
+//   res.json({ message: "Backend Running..." });
+// });
+ 
 app.get("/", (req, res) => {
   res.json({ message: "Backend Running..." });
 });
- 
-
 module.exports = app;
  
