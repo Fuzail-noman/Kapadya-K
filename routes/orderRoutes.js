@@ -1,6 +1,8 @@
 const express = require("express");
 const Order = require("../models/Order");
 const upload = require("../middleware/upload");
+const verifyUser = require("../middleware/verifyUser");
+const verifyAdmin = require("../middleware/verifyAdmin");
  
 const router = express.Router();
  
@@ -18,16 +20,16 @@ function getDeliveryFee(country) {
 /**
  * POST /api/orders
  * CheckoutPage se order place karne ke liye.
- * multipart/form-data: userId, name, phone, country, city, items (JSON string), receipt (file)
+ * multipart/form-data: name, phone, country, city, items (JSON string), receipt (file)
  * (area ab frontend se nahi aati — CheckoutPage se hata di gayi thi)
+ *
+ * verifyUser lagne ke baad userId ab body se nahi, token se (req.user.id)
+ * liya jata hai — warna koi bhi kisi aur ke id se order bana sakta tha.
  */
-router.post("/", upload.single("receipt"), async (req, res) => {
+router.post("/", verifyUser, upload.single("receipt"), async (req, res) => {
   try {
-    const { userId, name, phone, country, city, items, subtotalPKR } = req.body;
+    const { name, phone, country, city, items, subtotalPKR } = req.body;
  
-    if (!userId) {
-      return res.status(401).json({ message: "Login required" });
-    }
     if (!req.file) {
       return res.status(400).json({ message: "Payment screenshot required" });
     }
@@ -47,7 +49,7 @@ router.post("/", upload.single("receipt"), async (req, res) => {
     const totalPKR = parsedSubtotal + deliveryFeePKR;
  
     const order = await Order.create({
-      user: userId,
+      user: req.user.id,
       items: parsedItems,
       shipping: { name, phone, country, city },
       subtotalPKR: parsedSubtotal,
@@ -66,12 +68,14 @@ router.post("/", upload.single("receipt"), async (req, res) => {
 });
  
 /**
- * GET /api/orders/:userId
- * Logged-in user apne orders dekh sake
+ * GET /api/orders/me
+ * Logged-in user apne khud ke orders dekh sake.
+ * (Pehle ye /:userId tha jahan koi bhi kisi ka bhi userId daal ke
+ * uske orders dekh sakta tha — ab sirf apna login wala user dekh sakta hai.)
  */
-router.get("/:userId", async (req, res) => {
+router.get("/me", verifyUser, async (req, res) => {
   try {
-    const orders = await Order.find({ user: req.params.userId }).sort({ createdAt: -1 });
+    const orders = await Order.find({ user: req.user.id }).sort({ createdAt: -1 });
     res.json(orders);
   } catch (err) {
     res.status(500).json({ message: "Something went wrong", error: err.message });
@@ -80,11 +84,11 @@ router.get("/:userId", async (req, res) => {
  
 /**
  * GET /api/orders
- * Admin ke liye — sab orders
+ * Admin ke liye — sab orders. Ab verifyAdmin lag chuka hai.
  */
-router.get("/", async (req, res) => {
+router.get("/", verifyUser, verifyAdmin, async (req, res) => {
   try {
-    const orders = await Order.find().populate("user", "name email").sort({ createdAt: -1 });
+    const orders = await Order.find().populate("user", "fullName email").sort({ createdAt: -1 });
     res.json(orders);
   } catch (err) {
     res.status(500).json({ message: "Something went wrong", error: err.message });
@@ -93,9 +97,10 @@ router.get("/", async (req, res) => {
  
 /**
  * PATCH /api/orders/:id/status
- * Admin order status update kare (pending -> confirmed -> shipped -> delivered)
+ * Admin order status update kare (pending -> confirmed -> shipped -> delivered).
+ * Ab verifyAdmin lag chuka hai.
  */
-router.patch("/:id/status", async (req, res) => {
+router.patch("/:id/status", verifyUser, verifyAdmin, async (req, res) => {
   try {
     const { status } = req.body;
     const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true });
@@ -107,4 +112,3 @@ router.patch("/:id/status", async (req, res) => {
 });
  
 module.exports = router;
- 
