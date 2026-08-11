@@ -1,126 +1,197 @@
-
 const express = require("express");
+const mongoose = require("mongoose");
+const streamifier = require("streamifier");
 const Order = require("../models/Order");
-const upload = require("../middleware/upload");
+const User = require("../models/User");
 const verifyUser = require("../middleware/verifyUser");
 const verifyAdmin = require("../middleware/verifyAdmin");
-
+const upload = require("../middleware/upload");
 const cloudinary = require("../config/Cloudinary");
- const app = express();
+ 
 const router = express.Router();
  
-// Same rule as CartPage.jsx — Pakistan users pay a flat local fee,
-// everyone else pays the international fee. Calculated here (not trusted
-// from the client) so the DB value can never be tampered with or wrong.
 const DELIVERY_FEE_PAKISTAN_PKR = 4000;
 const DELIVERY_FEE_INTERNATIONAL_PKR = 11000;
  
-function getDeliveryFee(country) {
-  const isPakistan = (country || "").trim().toLowerCase() === "pakistan";
-  return isPakistan ? DELIVERY_FEE_PAKISTAN_PKR : DELIVERY_FEE_INTERNATIONAL_PKR;
-}
- 
-// multer memoryStorage se aane wale buffer ko Cloudinary pe upload karta hai
-// aur secure_url (public link) return karta hai.
-function uploadReceiptToCloudinary(fileBuffer) {
+// Helper: multer memoryStorage se milne wale buffer ko Cloudinary
+// upload_stream ke zariye upload karta hai, koi disk write nahi hoti.
+function uploadBufferToCloudinary(buffer, folder = "receipts") {
   return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { folder: "receipts", resource_type: "image" },
+    const uploadStream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: "image" },
       (error, result) => {
         if (error) return reject(error);
         resolve(result);
       }
     );
-    stream.end(fileBuffer);
+    streamifier.createReadStream(buffer).pipe(uploadStream);
   });
 }
  
-
+// ================= CREATE ORDER =================
+// Frontend (CheckoutPage) FormData mein bhejta hai:
+// name, phone, country, city, items (JSON string), subtotalPKR, receipt (file)
 router.post("/", verifyUser, upload.single("receipt"), async (req, res) => {
   try {
     const { name, phone, country, city, items, subtotalPKR } = req.body;
  
+    if (!name || !phone || !country || !city || !items || !subtotalPKR) {
+      return res.status(400).json({
+        success: false,
+        message: "All fields are required",
+      });
+    }
+ 
     if (!req.file) {
-      return res.status(400).json({ message: "Payment screenshot required" });
-    }
-    if (!country) {
-      return res.status(400).json({ message: "Country is required" });
-    }
- 
-    const parsedItems = typeof items === "string" ? JSON.parse(items) : items;
-    const parsedSubtotal = Number(subtotalPKR);
- 
-    if (!Number.isFinite(parsedSubtotal) || parsedSubtotal <= 0) {
-      return res.status(400).json({ message: "Invalid subtotal" });
+      return res.status(400).json({
+        success: false,
+        message: "Payment screenshot is required",
+      });
     }
  
-    // Delivery fee is always computed here, never trusted from the client.
-    const deliveryFeePKR = getDeliveryFee(country);
-    const totalPKR = parsedSubtotal + deliveryFeePKR;
+    let parsedItems;
+    try {
+      parsedItems = JSON.parse(items);
+    } catch {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid items data",
+      });
+    }
  
-    // Receipt screenshot Cloudinary pe upload karo, uska secure link lo.
-    const cloudinaryResult = await uploadReceiptToCloudinary(req.file.buffer);
+    if (!Array.isArray(parsedItems) || parsedItems.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Cart is empty",
+      });
+    }
+ 
+    const subtotal = Number(subtotalPKR);
+    if (!Number.isFinite(subtotal) || subtotal <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid subtotal",
+      });
+    }
+ 
+    // Delivery fee frontend jaisi hi logic se server pe dobara calculate
+    // ki jaati hai — client se bheja hua total kabhi trust nahi karte.
+    const isPakistan = country.trim().toLowerCase() === "pakistan";
+    const deliveryFeePKR = isPakistan
+      ? DELIVERY_FEE_PAKISTAN_PKR
+      : DELIVERY_FEE_INTERNATIONAL_PKR;
+    const totalPKR = subtotal + deliveryFeePKR;
+ 
+    // Receipt screenshot ko Cloudinary par upload karo
+    const uploadResult = await uploadBufferToCloudinary(
+      req.file.buffer,
+      "receipts"
+    );
  
     const order = await Order.create({
       user: req.user.id,
       items: parsedItems,
       shipping: { name, phone, country, city },
-      subtotalPKR: parsedSubtotal,
+      subtotalPKR: subtotal,
       deliveryFeePKR,
       totalPKR,
       advancePayment: {
-        receiptImage: cloudinaryResult.secure_url,
+        amountPKR: totalPKR, // yahan full payment hi collect ho rahi hai
+        receiptImage: uploadResult.secure_url,
       },
     });
  
-    res.status(201).json({ message: "Order placed successfully", order });
+    res.json({
+      success: true,
+      message: "Order placed successfully",
+      order,
+    });
   } catch (err) {
     console.error("Create order error:", err);
-    res.status(500).json({ message: "Something went wrong", error: err.message });
+    res.status(500).json({
+      success: false,
+      message: err.message || "Something went wrong",
+    });
   }
 });
  
-/**
- * GET /api/orders/me
- * Logged-in user apne khud ke orders dekh sake.
- * (Pehle ye /:userId tha jahan koi bhi kisi ka bhi userId daal ke
- * uske orders dekh sakta tha — ab sirf apna login wala user dekh sakta hai.)
- */
-router.get("/me", verifyUser, async (req, res) => {
+// ================= GET MY ORDERS =================
+router.get("/mine", verifyUser, async (req, res) => {
   try {
-    const orders = await Order.find({ user: req.user.id }).sort({ createdAt: -1 });
-    res.json(orders);
+    const orders = await Order.find({ user: req.user.id }).sort({
+      createdAt: -1,
+    });
+ 
+    res.json({ success: true, orders });
   } catch (err) {
-    res.status(500).json({ message: "Something went wrong", error: err.message });
+    res.status(500).json({ success: false, message: err.message });
   }
 });
  
-/**
- * GET /api/orders
- * Admin ke liye — sab orders. Ab verifyAdmin lag chuka hai.
- */
+// ================= ADMIN: GET ALL ORDERS =================
 router.get("/", verifyUser, verifyAdmin, async (req, res) => {
   try {
-    const orders = await Order.find().populate("user", "fullName email").sort({ createdAt: -1 });
-    res.json(orders);
+    const orders = await Order.find()
+      .populate("user", "fullName email phone")
+      .sort({ createdAt: -1 });
+ 
+    res.json({ success: true, orders });
   } catch (err) {
-    res.status(500).json({ message: "Something went wrong", error: err.message });
+    res.status(500).json({ success: false, message: err.message });
   }
 });
  
-/**
- * PATCH /api/orders/:id/status
- * Admin order status update kare (pending -> confirmed -> shipped -> delivered).
- * Ab verifyAdmin lag chuka hai.
- */
+// ================= GET SINGLE ORDER (owner or admin) =================
+router.get("/:id", verifyUser, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
+    }
+ 
+    const order = await Order.findById(req.params.id);
+ 
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+ 
+    const requester = await User.findById(req.user.id);
+    const isOwner = order.user.toString() === req.user.id;
+ 
+    if (!isOwner && !(requester && requester.isAdmin)) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
+ 
+    res.json({ success: true, order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+ 
+// ================= ADMIN: UPDATE ORDER STATUS =================
 router.patch("/:id/status", verifyUser, verifyAdmin, async (req, res) => {
   try {
     const { status } = req.body;
-    const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true });
-    if (!order) return res.status(404).json({ message: "Order not found" });
-    res.json({ message: "Status updated", order });
+    const allowed = ["pending", "confirmed", "shipped", "delivered", "cancelled"];
+ 
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ success: false, message: "Invalid status" });
+    }
+ 
+    const order = await Order.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true }
+    );
+ 
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+ 
+    res.json({ success: true, order });
   } catch (err) {
-    res.status(500).json({ message: "Something went wrong", error: err.message });
+    res.status(500).json({ success: false, message: err.message });
   }
 });
  
