@@ -1,9 +1,12 @@
+
 const express = require("express");
 const Order = require("../models/Order");
 const upload = require("../middleware/upload");
 const verifyUser = require("../middleware/verifyUser");
 const verifyAdmin = require("../middleware/verifyAdmin");
- 
+
+const cloudinary = require("../config/Cloudinary");
+ const app = express();
 const router = express.Router();
  
 // Same rule as CartPage.jsx — Pakistan users pay a flat local fee,
@@ -17,15 +20,22 @@ function getDeliveryFee(country) {
   return isPakistan ? DELIVERY_FEE_PAKISTAN_PKR : DELIVERY_FEE_INTERNATIONAL_PKR;
 }
  
-/**
- * POST /api/orders
- * CheckoutPage se order place karne ke liye.
- * multipart/form-data: name, phone, country, city, items (JSON string), receipt (file)
- * (area ab frontend se nahi aati — CheckoutPage se hata di gayi thi)
- *
- * verifyUser lagne ke baad userId ab body se nahi, token se (req.user.id)
- * liya jata hai — warna koi bhi kisi aur ke id se order bana sakta tha.
- */
+// multer memoryStorage se aane wale buffer ko Cloudinary pe upload karta hai
+// aur secure_url (public link) return karta hai.
+function uploadReceiptToCloudinary(fileBuffer) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder: "receipts", resource_type: "image" },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result);
+      }
+    );
+    stream.end(fileBuffer);
+  });
+}
+ 
+
 router.post("/", verifyUser, upload.single("receipt"), async (req, res) => {
   try {
     const { name, phone, country, city, items, subtotalPKR } = req.body;
@@ -48,6 +58,9 @@ router.post("/", verifyUser, upload.single("receipt"), async (req, res) => {
     const deliveryFeePKR = getDeliveryFee(country);
     const totalPKR = parsedSubtotal + deliveryFeePKR;
  
+    // Receipt screenshot Cloudinary pe upload karo, uska secure link lo.
+    const cloudinaryResult = await uploadReceiptToCloudinary(req.file.buffer);
+ 
     const order = await Order.create({
       user: req.user.id,
       items: parsedItems,
@@ -56,7 +69,7 @@ router.post("/", verifyUser, upload.single("receipt"), async (req, res) => {
       deliveryFeePKR,
       totalPKR,
       advancePayment: {
-        receiptImage: `/uploads/receipts/${req.file.filename}`,
+        receiptImage: cloudinaryResult.secure_url,
       },
     });
  
